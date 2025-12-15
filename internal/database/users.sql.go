@@ -13,12 +13,36 @@ import (
 	"github.com/google/uuid"
 )
 
+const changeChirpyRed = `-- name: ChangeChirpyRed :one
+UPDATE users SET is_chirpy_red=$1, updated_at=NOW() WHERE id=$2
+RETURNING id, created_at, updated_at, email, hashed_password, is_chirpy_red
+`
+
+type ChangeChirpyRedParams struct {
+	IsChirpyRed bool
+	ID          uuid.UUID
+}
+
+func (q *Queries) ChangeChirpyRed(ctx context.Context, arg ChangeChirpyRedParams) (User, error) {
+	row := q.db.QueryRowContext(ctx, changeChirpyRed, arg.IsChirpyRed, arg.ID)
+	var i User
+	err := row.Scan(
+		&i.ID,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.Email,
+		&i.HashedPassword,
+		&i.IsChirpyRed,
+	)
+	return i, err
+}
+
 const createUser = `-- name: CreateUser :one
 INSERT INTO users (id, created_at, updated_at, email, hashed_password)
 VALUES (
     $1, NOW(), NOW(), $2, $3
 )
-RETURNING id, created_at, updated_at, email, hashed_password
+RETURNING id, created_at, updated_at, email, hashed_password, is_chirpy_red
 `
 
 type CreateUserParams struct {
@@ -36,6 +60,7 @@ func (q *Queries) CreateUser(ctx context.Context, arg CreateUserParams) (User, e
 		&i.UpdatedAt,
 		&i.Email,
 		&i.HashedPassword,
+		&i.IsChirpyRed,
 	)
 	return i, err
 }
@@ -59,7 +84,7 @@ func (q *Queries) GetRefreshTokenRecord(ctx context.Context, token string) (Refr
 }
 
 const getUserByEmail = `-- name: GetUserByEmail :one
-SELECT id, created_at, updated_at, email, hashed_password FROM users WHERE email=$1
+SELECT id, created_at, updated_at, email, hashed_password, is_chirpy_red FROM users WHERE email=$1
 `
 
 func (q *Queries) GetUserByEmail(ctx context.Context, email string) (User, error) {
@@ -71,6 +96,7 @@ func (q *Queries) GetUserByEmail(ctx context.Context, email string) (User, error
 		&i.UpdatedAt,
 		&i.Email,
 		&i.HashedPassword,
+		&i.IsChirpyRed,
 	)
 	return i, err
 }
@@ -85,6 +111,7 @@ func (q *Queries) NukeUsers(ctx context.Context) error {
 }
 
 const registerRefreshToken = `-- name: RegisterRefreshToken :one
+
 INSERT INTO refresh_tokens (token, created_at, updated_at, user_id, expires_at, revoked_at)
 VALUES (
     $1, NOW(), NOW(), $2, $3, NULL
@@ -98,6 +125,7 @@ type RegisterRefreshTokenParams struct {
 	ExpiresAt time.Time
 }
 
+// Auth ----------------------------------------------------------------------
 func (q *Queries) RegisterRefreshToken(ctx context.Context, arg RegisterRefreshTokenParams) (RefreshToken, error) {
 	row := q.db.QueryRowContext(ctx, registerRefreshToken, arg.Token, arg.UserID, arg.ExpiresAt)
 	var i RefreshToken
@@ -138,7 +166,7 @@ func (q *Queries) RevokeRefreshToken(ctx context.Context, arg RevokeRefreshToken
 
 const updateUser = `-- name: UpdateUser :one
 UPDATE users SET email=$1, hashed_password=$2, updated_at=NOW() WHERE id=$3
-RETURNING id, created_at, updated_at, email, hashed_password
+RETURNING id, created_at, updated_at, email, hashed_password, is_chirpy_red
 `
 
 type UpdateUserParams struct {
@@ -156,6 +184,7 @@ func (q *Queries) UpdateUser(ctx context.Context, arg UpdateUserParams) (User, e
 		&i.UpdatedAt,
 		&i.Email,
 		&i.HashedPassword,
+		&i.IsChirpyRed,
 	)
 	return i, err
 }

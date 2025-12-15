@@ -26,6 +26,7 @@ type apiConfig struct {
 	Db             *database.Queries
 	Platform       string
 	Secret         string
+	PolkaAPIKey    string
 }
 type User struct {
 	ID           uuid.UUID `json:"id"`
@@ -34,6 +35,7 @@ type User struct {
 	Email        string    `json:"email"`
 	Token        string    `json:"token,omitempty"`
 	RefreshToken string    `json:"refresh_token,omitempty"`
+	IsChirpyRed  bool      `json:"is_chirpy_red"`
 }
 type Chirp struct {
 	ID        uuid.UUID `json:"id"`
@@ -64,12 +66,16 @@ func main() {
 
 	mux := http.NewServeMux()
 	config := apiConfig{
-		Db:       dbQueries,
-		Platform: os.Getenv("PLATFORM"),
-		Secret:   os.Getenv("SECRET"),
+		Db:          dbQueries,
+		Platform:    os.Getenv("PLATFORM"),
+		Secret:      os.Getenv("SECRET"),
+		PolkaAPIKey: os.Getenv("POLKA_KEY"),
 	}
 
 	mux.Handle("/app/", http.StripPrefix("/app/", config.middlewareMetricsInc(http.FileServer(http.Dir(".")))))
+
+	// WebHooks
+	mux.HandleFunc("POST /api/polka/webhooks", config.polkaWebhookHandler)
 
 	// Misc
 	mux.HandleFunc("GET /admin/metrics", config.metricsHandler)
@@ -128,6 +134,12 @@ func respondWithJson(w http.ResponseWriter, code int, payload interface{}) {
 
 	w.Write(content)
 }
+func respondWithNoContent(w http.ResponseWriter) {
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusNoContent)
+
+}
 
 // Misc
 func cleanMessage(msg string) string {
@@ -150,11 +162,11 @@ func cleanMessage(msg string) string {
 
 	return strings.TrimSpace(cleanMsg)
 }
-func retrieveTokenFromHeader(w http.ResponseWriter, r *http.Request) string {
+func retrieveFromHeader(w http.ResponseWriter, r *http.Request, function func(http.Header) (string, error)) string {
 
-	token, err := auth.GetBearerToken(r.Header)
+	key, err := function(r.Header)
 	if err != nil {
-		if err == auth.ErrInvalidFormat || err == auth.ErrMissingBearerText || err == auth.ErrMissingHeader {
+		if err == auth.ErrInvalidFormat || err == auth.ErrMissingBearerText || err == auth.ErrMissingHeader || err == auth.ErrMissingAPIText {
 			respondWithError(w, http.StatusUnauthorized, err.Error())
 			return ""
 		}
@@ -162,7 +174,7 @@ func retrieveTokenFromHeader(w http.ResponseWriter, r *http.Request) string {
 		return ""
 	}
 
-	return token
+	return key
 }
 func (cfg *apiConfig) retrieveChirpWithID(w http.ResponseWriter, r *http.Request) database.Chirp {
 	uuidStr := r.PathValue("chirpID")
@@ -202,6 +214,7 @@ func userToUser(dbUser database.User, token, refreshToken string) User {
 		Email:        dbUser.Email,
 		Token:        token,
 		RefreshToken: refreshToken,
+		IsChirpyRed:  dbUser.IsChirpyRed,
 	}
 }
 func chirpToChirp(chirp database.Chirp) Chirp {
@@ -227,7 +240,7 @@ func (cfg *apiConfig) middlewareMetricsInc(next http.Handler) http.Handler {
 func (cfg *apiConfig) middlewareAuthentication(function func(w http.ResponseWriter, r *http.Request, userID uuid.UUID)) func(w http.ResponseWriter, r *http.Request) {
 	return func(w http.ResponseWriter, r *http.Request) {
 
-		token := retrieveTokenFromHeader(w, r)
+		token := retrieveFromHeader(w, r, auth.GetBearerToken)
 		if token == "" {
 			return
 		}
@@ -337,7 +350,7 @@ func (cfg *apiConfig) createUserHandler(w http.ResponseWriter, r *http.Request) 
 
 func (cfg *apiConfig) refreshHandler(w http.ResponseWriter, r *http.Request) {
 
-	rToken := retrieveTokenFromHeader(w, r)
+	rToken := retrieveFromHeader(w, r, auth.GetBearerToken)
 	if rToken == "" {
 		return
 	}
@@ -374,7 +387,7 @@ func (cfg *apiConfig) refreshHandler(w http.ResponseWriter, r *http.Request) {
 
 func (cfg *apiConfig) revokeHandler(w http.ResponseWriter, r *http.Request) {
 
-	rToken := retrieveTokenFromHeader(w, r)
+	rToken := retrieveFromHeader(w, r, auth.GetBearerToken)
 	if rToken == "" {
 		return
 	}
@@ -388,8 +401,7 @@ func (cfg *apiConfig) revokeHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusNoContent)
+	respondWithNoContent(w)
 }
 
 func (cfg *apiConfig) putUserHandler(w http.ResponseWriter, r *http.Request, userId uuid.UUID) {
@@ -474,17 +486,37 @@ func (cfg *apiConfig) deleteChirpHandler(w http.ResponseWriter, r *http.Request,
 		return
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusNoContent)
+	respondWithNoContent(w)
 
 }
 
 func (cfg *apiConfig) getChirpsHandler(w http.ResponseWriter, r *http.Request) {
 
-	dbChirps, err := cfg.Db.GetAllChirps(r.Context())
-	if err != nil {
-		respondWithServerError(w, err)
-		return
+	authorId := r.URL.Query().Get("author_id")
+	var dbChirps []database.Chirp
+	var err error
+
+	if authorId == "" {
+
+		dbChirps, err = cfg.Db.GetAllChirps(r.Context())
+		if err != nil {
+			respondWithServerError(w, err)
+			return
+		}
+
+	} else {
+
+		authorUUID, err := uuid.Parse(authorId)
+		if err != nil {
+			respondWithServerError(w, err)
+			return
+		}
+
+		dbChirps, err = cfg.Db.GetUserChirps(r.Context(), authorUUID)
+		if err != nil {
+			respondWithServerError(w, err)
+			return
+		}
 	}
 
 	chirps := []Chirp{}
@@ -504,6 +536,52 @@ func (cfg *apiConfig) getChirpHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	respondWithJson(w, http.StatusOK, chirpToChirp(chirp))
+}
+
+// #region WebHooks
+// =====================================================================================================================================
+
+func (cfg *apiConfig) polkaWebhookHandler(w http.ResponseWriter, r *http.Request) {
+
+	key := retrieveFromHeader(w, r, auth.GetApiKey)
+	if key == "" {
+		return
+	}
+
+	if key != cfg.PolkaAPIKey {
+		respondWithError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+
+	rBody := struct {
+		Event string `json:"event"`
+		Data  struct {
+			UserId uuid.UUID `json:"user_id"`
+		} `json:"data"`
+	}{}
+	err := json.NewDecoder(r.Body).Decode(&rBody)
+	if err != nil {
+		respondWithServerError(w, err)
+		return
+	}
+
+	if rBody.Event != "user.upgraded" {
+		respondWithNoContent(w)
+		return
+	}
+
+	_, err = cfg.Db.ChangeChirpyRed(r.Context(), database.ChangeChirpyRedParams{
+		IsChirpyRed: true,
+		ID:          rBody.Data.UserId,
+	})
+
+	if err != nil {
+		respondWithServerError(w, err)
+		return
+	}
+
+	respondWithNoContent(w)
+
 }
 
 // #region Misc Handlers

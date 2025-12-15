@@ -17,6 +17,7 @@ var (
 	ErrMissingHeader     = errors.New("authorization header is missing")
 	ErrInvalidFormat     = errors.New("authorization header format is invalid")
 	ErrMissingBearerText = errors.New("authorization header must start with Bearer")
+	ErrMissingAPIText    = errors.New("authorization header must start with ApiKey")
 )
 
 func HashPassword(password string) (string, error) {
@@ -92,4 +93,28 @@ func MakeRefreshToken() string {
 	rand.Read(key)
 
 	return hex.EncodeToString(key)
+}
+func GetApiKey(headers http.Header) (string, error) {
+
+	var split []string
+
+	if val := headers.Get("authorization"); len(val) > 0 {
+		split = strings.Split(val, " ")
+	} else {
+		return "", ErrMissingHeader
+	}
+
+	if len(split) != 2 {
+		return "", ErrInvalidFormat
+	}
+
+	if split[0] != "ApiKey" {
+		return "", ErrMissingAPIText
+	}
+
+	if len(split[1]) == 0 {
+		return "", ErrInvalidFormat
+	}
+
+	return split[1], nil
 }
